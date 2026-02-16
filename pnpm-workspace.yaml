@@ -1,0 +1,9 @@
+# pnpm Workspace Configuration
+
+# Define the projects in your workspace
+packages:
+  - 'packages/*'
+  - 'apps/*'
+
+# Optional: Specify the installation strategy
+# strict-peer-dependencies: true
