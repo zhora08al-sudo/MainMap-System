@@ -1,0 +1,1 @@
+{\n  "name": "MainMap-System\",\n  "private": true,\n  "workspaces": [\n    "packages/*"\n  ]\n}
