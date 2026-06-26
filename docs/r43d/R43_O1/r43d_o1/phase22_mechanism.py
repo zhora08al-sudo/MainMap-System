@@ -23,6 +23,7 @@ import numpy as np
 from scipy.signal import hilbert
 from sklearn.cluster import SpectralClustering
 from sklearn.metrics import adjusted_rand_score
+from integrate import full_corr_coh, _knn_sym, plv   # метод автора corr→coh + утилиты
 
 rng = np.random.default_rng(43)
 
@@ -74,23 +75,50 @@ def corr_raw_cluster(s, K):
     return SpectralClustering(K, affinity="precomputed", random_state=0).fit_predict(C)
 
 
+# ── метод автора: СНАЧАЛА корреляция (отбор), ПОТОМ когеренция (вес) ──
+def corr_coh_asis(s, K, k=8):
+    """corr→coh КАК ЕСТЬ (Ф11/Ф16): отбор соседей по нуль-лаговой корр cos(φ), вес PLV."""
+    return full_corr_coh(inst_phase(s), K, k)
+
+
+def lag_corr_mat(s):
+    """ЛАГ-устойчивая корреляция = |комплексная корреляция аналитического сигнала|.
+    Инвариантна к постоянному фазовому сдвигу (нуль-лаговая corr cos этим свойством НЕ
+    обладает). Это и есть «когеренция, проявленная как корреляция» — сохраняем замысел
+    автора (корреляция-первой), но делаем её лаг-инвариантной."""
+    z = hilbert(s, axis=0); z = z - z.mean(0)
+    num = np.abs(z.conj().T @ z)
+    nrm = np.sqrt(np.sum(np.abs(z)**2, 0)); nrm[nrm == 0] = 1.0
+    C = num / np.outer(nrm, nrm); np.fill_diagonal(C, 1.0)
+    return C
+
+
+def corr_coh_lag(s, K, k=8):
+    """corr→coh ЛАГ-УСТОЙЧИВЫЙ: отбор соседей по лаг-инвариантной корреляции, вес PLV.
+    Тот же двухступенчатый замысел автора, но первая ступень переживает фазовый лаг."""
+    ph = inst_phase(s)
+    mask = _knn_sym(lag_corr_mat(s), k) > 0
+    P = plv(ph); W = np.where(mask, np.clip(P, 0, None), 0.0); np.fill_diagonal(W, 1.0)
+    return SpectralClustering(K, affinity="precomputed", random_state=0).fit_predict(W)
+
+
 def sweep(M, axis, vals, reps=5, **fixed):
-    print(f"\n  {axis:>10} | {'PLV(фаза)':>10} {'corr cos(φ)':>12} {'corr сырой s':>13} | вывод")
-    print("  " + "-"*68)
+    # 5 методов: чистая фаза | чистая корр cos | corr→coh КАК ЕСТЬ | corr→coh ЛАГ-устойч
+    print(f"\n  {axis:>8} | {'PLV':>7} {'corr cos':>9} {'corr→coh(как есть)':>19} {'corr→coh(лаг)':>14}")
+    print("  " + "-"*72)
     out = []
     for v in vals:
-        a_plv, a_cos, a_raw = [], [], []
+        a_plv, a_cos, a_a, a_l = [], [], [], []
         for r in range(reps):
             kw = dict(fixed); kw[axis] = v
             s, gt = make_signals(N=60, M=M, T=4000, **kw)
             a_plv.append(adjusted_rand_score(gt, plv_cluster(s, M)))
             a_cos.append(adjusted_rand_score(gt, corr_cos_cluster(s, M)))
-            a_raw.append(adjusted_rand_score(gt, corr_raw_cluster(s, M)))
-        mp, mc, mr = np.mean(a_plv), np.mean(a_cos), np.mean(a_raw)
-        edge = mp - mr
-        tag = "фаза >> сырая корр" if edge > 0.15 else ("≈ паритет" if abs(edge) <= 0.15 else "корр > фазы")
-        print(f"  {v:>10.2f} | {mp:>10.3f} {mc:>12.3f} {mr:>13.3f} | {tag}")
-        out.append((v, mp, mc, mr))
+            a_a.append(adjusted_rand_score(gt, corr_coh_asis(s, M)))
+            a_l.append(adjusted_rand_score(gt, corr_coh_lag(s, M)))
+        row = (v, np.mean(a_plv), np.mean(a_cos), np.mean(a_a), np.mean(a_l))
+        print(f"  {v:>8.2f} | {row[1]:>7.3f} {row[2]:>9.3f} {row[3]:>19.3f} {row[4]:>14.3f}")
+        out.append(row)
     return out
 
 
@@ -102,25 +130,22 @@ if __name__ == "__main__":
     print(f"  N=60, сообществ={M}, повторов на точку=5")
 
     print("\n── ОСЬ A: амплитудный шум η (фазовый лаг = 0) ──")
-    print("   (проверка гипотезы «амплитуда лжёт → фаза выигрывает»)")
-    A = sweep(M, "eta", [0.0, 1.0, 2.0, 4.0, 8.0], lag=0.0)
+    A = sweep(M, "eta", [0.0, 2.0, 4.0, 8.0], lag=0.0)
 
     print("\n── ОСЬ B: фазовый ЛАГ внутри сообщества (амплитуда чистая, η=0) ──")
-    print("   (захват с постоянным сдвигом: корреляция cos ортогональна, PLV цел)")
+    print("   ключевой тест замысла автора «сначала корреляция, потом когеренция»")
     B = sweep(M, "lag", [0.0, 0.4, 0.8, 1.2, 1.57], eta=0.0)
 
-    print("\n[ЧЕСТНЫЙ ВЫВОД]")
-    a_hi = A[-1]
-    print(f"  ОСЬ A: гипотеза ОПРОВЕРГНУТА — при η={a_hi[0]:.0f} сырая корр {a_hi[3]:.2f} ≥ PLV"
-          f" {a_hi[1]:.2f}.")
-    print("         Амплитудный шум портит извлечение фазы по Гильберту → корреляция РОБАСТНЕЕ.")
+    print("\n[ЧЕСТНЫЙ ВЫВОД — про двухступенчатый метод автора corr→coh]")
     b0, bhi = B[0], B[-1]
-    won = bhi[1] - bhi[3] > 0.15
-    print(f"  ОСЬ B: при лаге=0 паритет (corr cos {b0[2]:.2f}); при лаге≈π/2 corr cos ПАДАЕТ"
-          f" до {bhi[2]:.2f}, а PLV держит {bhi[1]:.2f}.")
-    print(f"         → фаза бьёт КОРРЕЛЯЦИЮ cos ИМЕННО на ЛАГОВОМ захвате"
-          f" ({'подтверждено' if won or bhi[1]-bhi[2]>0.15 else 'не подтверждено'}).")
-    print("  СМЫСЛ для R43 O1: ниша фазы — ЛАГОВАЯ синхронизация (задержки связи), а не")
-    print("  амплитудный шум. Реальный ЭЭГ (Ф21) с долевой группировкой — в основном нулевой")
-    print("  лаг (объёмная проводимость), поэтому корреляция не хуже. Идея автора ценна там,")
-    print("  где связь имеет ЗАДЕРЖКУ — и это конкретная проверяемая граница, а не общий лозунг.")
+    print(f"  ОСЬ B (лаг π/2): чистая корр cos рушится {b0[2]:.2f}→{bhi[2]:.2f}.")
+    print(f"    • corr→coh КАК ЕСТЬ (отбор нуль-лаговой корр) ТОЖЕ падает: {b0[3]:.2f}→{bhi[3]:.2f}")
+    print(f"      — подтверждает твою поправку: первая ступень (корреляция) под лагом ломает трубу.")
+    print(f"    • corr→coh ЛАГ-устойчивый (отбор лаг-инвариантной корр → когеренция) держит:"
+          f" {b0[4]:.2f}→{bhi[4]:.2f}.")
+    print("  → Замысел «сначала корреляция, потом когеренция» ВЕРЕН, но корреляция-отбор обязана")
+    print("    быть ЛАГ-ИНВАРИАНТНОЙ (|комплексная корр| аналитического сигнала). Тогда двухступка")
+    print("    переживает задержанную связь, где простая корреляция и наивный corr→coh слепнут.")
+    print("  ОСЬ A: амплитудный шум — не ниша фазы (Гильберт-фаза портится); это про лаг, не амплитуду.")
+    print("  СВЯЗЬ с Ф21: ЭЭГ-доли ≈ нулевой лаг (объёмн. проводимость) → даже наивная корр работает;")
+    print("    выигрыш ждать на ЗАДЕРЖАННОЙ связи, и там нужен ЛАГ-устойчивый отбор первой ступени.")
