@@ -1,0 +1,60 @@
+name: Build GIF
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-gif.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+
+      - name: Download frames
+        run: |
+          set -e
+          mkdir -p frames norm
+          curl -fsSL -o frames/left.png   "https://mistralaichatupprodswe.blob.core.windows.net/chat-images/assistant/98/8f/84/988f8455-e55a-4642-a3f1-5de80d59efde/0610f871-ec0e-46e4-bcfb-944c1d7f3106/828a2958-61a6-4e18-9016-6e28767107b8/d6c84240-231d-470c-abbd-b5f79ea9e1ed.png"
+          curl -fsSL -o frames/center.png "https://mistralaichatupprodswe.blob.core.windows.net/chat-images/assistant/98/8f/84/988f8455-e55a-4642-a3f1-5de80d59efde/0610f871-ec0e-46e4-bcfb-944c1d7f3106/6716424a-34a1-4883-b821-e1f9ba5b2a3e/f7a90f38-1891-49ef-b606-b0feb1111d85.png"
+          curl -fsSL -o frames/right.png  "https://mistralaichatupprodswe.blob.core.windows.net/chat-images/assistant/98/8f/84/988f8455-e55a-4642-a3f1-5de80d59efde/0610f871-ec0e-46e4-bcfb-944c1d7f3106/1133e562-4f44-46c7-b1b8-b7079a594020/6510fc1a-1a3a-405e-b4af-ec4642bd58f8.png"
+          ls -la frames
+
+      - name: Normalize sizes
+        run: |
+          set -e
+          for f in left center right; do
+            convert "frames/$f.png" -resize '800x800>' -gravity center -background '#0b0b0b' -extent 800x800 "norm/$f.png"
+          done
+
+      - name: Build GIF
+        run: |
+          set -e
+          convert -delay 30 -loop 0 \
+            norm/left.png norm/center.png norm/right.png norm/center.png \
+            -coalesce -layers Optimize grozny-gif.gif
+          ls -la grozny-gif.gif
+
+      - name: Commit GIF
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add grozny-gif.gif
+          git commit -m "Build grozny GIF [skip ci]" || echo "nothing to commit"
+          git push
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grozny-gif
+          path: grozny-gif.gif
